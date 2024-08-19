@@ -134,7 +134,7 @@ describe("Sybil", function () {
         poseidonAddr2,
         poseidonAddr3,
         poseidonAddr4
-      )).to.be.revertedWith('Sybil::initializeSybil ALREADY_INITIALIZED');
+      )).to.be.revertedWithCustomError(sybil, "InvalidInitialization()");
     });
     
     it("Should emit event after initialization", async function() {

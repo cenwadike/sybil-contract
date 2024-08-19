@@ -3,7 +3,6 @@
 pragma solidity ^0.8.24;
 
 import "@openzeppelin/contracts/proxy/utils/Initializable.sol";
-// import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 
 /**
  * @dev Interface poseidon hash function 2 elements
@@ -74,7 +73,7 @@ contract SybilHelpers is Initializable {
         address _poseidon2Elements,
         address _poseidon3Elements,
         address _poseidon4Elements
-    ) internal initializer {
+    ) internal onlyInitializing {
         _insPoseidonUnit2 = PoseidonUnit2(_poseidon2Elements);
         _insPoseidonUnit3 = PoseidonUnit3(_poseidon3Elements);
         _insPoseidonUnit4 = PoseidonUnit4(_poseidon4Elements);

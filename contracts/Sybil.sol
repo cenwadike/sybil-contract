@@ -123,9 +123,6 @@ contract Sybil is SybilHelpers {
     // contract admin
     address public owner;
 
-    // keep track of contract initialization state
-    bool private isInitialized;
-
     // Event emitted when the contract is initialized
     event InitializeHermezEvent(
         uint8 forgeL1L2BatchTimeout
@@ -158,12 +155,9 @@ contract Sybil is SybilHelpers {
         address _poseidon2Elements,
         address _poseidon3Elements,
         address _poseidon4Elements
-    ) external {
-        require(isInitialized == false, "Sybil::initializeSybil ALREADY_INITIALIZED");
-
-        // set admin state variables
+    ) external initializer {
+        // set admin state variable
         owner = address(msg.sender);
-        isInitialized = true;
 
         // set state variables
         _initializeVerifiers(_verifiers, _verifiersParams);
