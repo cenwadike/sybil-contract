@@ -2,8 +2,7 @@
 
 pragma solidity ^0.8.24;
 
-// Uncomment this line to use console.log
-// import "hardhat/console.sol";
+import "hardhat/console.sol";
 import "./interfaces/IVerifierRollup.sol";
 import "./interfaces/IVerifierWithdrawInterface.sol";
 import "./lib/SybilHelpers.sol";
@@ -40,7 +39,7 @@ contract Sybil is SybilHelpers {
     uint48 constant _EXIT_IDX = 1;
 
     // Max load amount allowed (loadAmount: L1 --> L2)
-    uint256 constant _LIMIT_LOAD_AMOUNT = (1 << 128);
+    uint256 constant _LIMIT_LOAD_AMOUNT = (1 << 114);
 
     // Max amount allowed (amount L2 --> L2)
     uint256 constant _LIMIT_L2TRANSFER_AMOUNT = (1 << 192);
@@ -59,7 +58,7 @@ contract Sybil is SybilHelpers {
     // And the maximum User TX is _MAX_L1_USER_TX
 
     // Maximum L1-user transactions allowed to be queued in a batch
-    uint256 constant _MAX_L1_USER_TX = 128;
+    uint256 constant _MAX_L1_USER_TX = 114;
 
     // Maximum L1 transactions allowed to be queued in a batch
     uint256 constant _MAX_L1_TX = 256;
@@ -124,7 +123,7 @@ contract Sybil is SybilHelpers {
     address public owner;
 
     // Event emitted when the contract is initialized
-    event InitializeHermezEvent(
+    event InitializeSybilEvent(
         uint8 forgeL1L2BatchTimeout
     );
 
@@ -146,7 +145,7 @@ contract Sybil is SybilHelpers {
     );
 
     // Event emitted when the contract is updated to the new version
-    event hermezV2();
+    event SybilV2();
 
     function initialize(
         address[] memory _verifiers,
@@ -165,10 +164,10 @@ contract Sybil is SybilHelpers {
 
         // set default state variables
         lastIdx = _RESERVED_IDX;
-        lastL1L2Batch = 0; // --> first batch forced to be L1Batch
-        nextL1ToForgeQueue = 0; // --> First queue will be forged
-        nextL1FillingQueue = 1;
-        stateRootMap[0] = 0; // --> genesis batch will have root = 0
+        // lastL1L2Batch = 0; // --> first batch forced to be L1Batch
+        // nextL1ToForgeQueue = 0; // --> First queue will be forged
+        // nextL1FillingQueue = 1;
+        // stateRootMap[0] = 0; // --> genesis batch will have root = 0
 
         // initialize libs
         _initializeHelpers(
@@ -176,8 +175,141 @@ contract Sybil is SybilHelpers {
             _poseidon3Elements,
             _poseidon4Elements
         );
-        emit InitializeHermezEvent(
+
+        emit InitializeSybilEvent(
             _forgeL1L2BatchTimeout
+        );
+    }
+
+    //////////////
+    // User L1 rollup tx
+    /////////////
+
+    // This are all the possible L1-User transactions:
+    // | fromIdx | toIdx | loadAmountF | amountF | babyPubKey |           l1-user-TX            |
+    // |:-------:|:-----:|:-----------:|:-------:|:----------:|:-------------------------------:|
+    // |    0    |   0   |      0      |    0    |    !=0     |          createAccount          |
+    // |    0    |   0   |     !=0     |    0    |    !=0     |      createAccountDeposit       |
+    // |    0    | 255+  |      X      |    X    |    !=0     | createAccountDepositAndTransfer |
+    // |  255+   |   0   |      X      |    0    |     0      |             Deposit             |
+    // |  255+   |   1   |      0      |    X    |     0      |              Exit               |
+    // |  255+   | 255+  |      0      |    X    |     0      |            Transfer             |
+    // |  255+   | 255+  |     !=0     |    X    |     0      |       DepositAndTransfer        |
+    // As can be seen in the table the type of transaction is determined basically by the "fromIdx" and "toIdx"
+    // The 'X' means that can be any valid value and does not change the l1-user-tx type
+    // Other parameters must be consistent, for example, if toIdx is 0, amountF must be 0, because there's no L2 transfer
+
+    /**
+     * @dev Create a new rollup l1 user transaction
+     * @param babyPubKey Public key babyjubjub represented as point: sign + (Ay)
+     * @param fromIdx Index leaf of sender account or 0 if create new account
+     * @param loadAmountF Amount from L1 to L2 to sender account or new account
+     * @param amountF Amount transfered between L2 accounts
+     * @param toIdx Index leaf of recipient account, or _EXIT_IDX if exit, or 0 if not transfer
+     * Events: `L1UserTxEvent`
+     */
+    function addL1Transaction(
+        uint256 babyPubKey,
+        uint48 fromIdx,
+        uint40 loadAmountF,
+        uint40 amountF,
+        uint48 toIdx
+    ) external payable {
+        // check loadAmount
+        uint256 loadAmount = _float2Fix(loadAmountF);
+        require(
+            loadAmount < _LIMIT_LOAD_AMOUNT,
+            "Sybil::addL1Transaction: LOADAMOUNT_EXCEED_LIMIT"
+        );
+
+        // verify deposit ether
+        if (loadAmount > 0) {
+            require(
+                loadAmount == msg.value,
+                "Sybil::addL1Transaction: LOADAMOUNT_ETH_DOES_NOT_MATCH"
+            );            
+        }
+
+        // perform L1 User Tx
+        _addL1Transaction(
+            msg.sender,
+            babyPubKey,
+            fromIdx,
+            loadAmountF,
+            amountF,
+            toIdx
+        );
+    }
+
+    /**
+     * @dev Create a new rollup l1 user transaction
+     * @param ethAddress Ethereum addres of the sender account or new account
+     * @param babyPubKey Public key babyjubjub represented as point: sign + (Ay)
+     * @param fromIdx Index leaf of sender account or 0 if create new account
+     * @param loadAmountF Amount from L1 to L2 to sender account or new account
+     * @param amountF Amount transfered between L2 accounts
+     * @param toIdx Index leaf of recipient account, or _EXIT_IDX if exit, or 0 if not transfer
+     * Events: `L1UserTxEvent`
+     */
+    function _addL1Transaction(
+        address ethAddress,
+        uint256 babyPubKey,
+        uint48 fromIdx,
+        uint40 loadAmountF,
+        uint40 amountF,
+        uint48 toIdx
+    ) internal {
+        // check amount
+        uint256 amount = _float2Fix(amountF);
+        require(
+            amount < _LIMIT_L2TRANSFER_AMOUNT,
+            "Sybil::_addL1Transaction: AMOUNT_EXCEED_LIMIT"
+        );
+
+        // toIdx can be: 0, _EXIT_IDX or (toIdx > _RESERVED_IDX)
+        if (toIdx == 0) {
+            require(
+                (amount == 0),
+                "Sybil::_addL1Transaction: AMOUNT_MUST_BE_0_IF_NOT_TRANSFER"
+            );
+        } else {
+            if ((toIdx == _EXIT_IDX)) {
+                require(
+                    (loadAmountF == 0),
+                    "Sybil::_addL1Transaction: LOADAMOUNT_MUST_BE_0_IF_EXIT"
+                );
+            } else {
+                require(
+                    ((toIdx > _RESERVED_IDX) && (toIdx <= lastIdx)),
+                    "Sybil::_addL1Transaction: INVALID_TOIDX"
+                );
+            }
+        }
+
+        // fromIdx can be: 0 if create account or (fromIdx > _RESERVED_IDX)
+        if (fromIdx == 0) {
+            require(
+                babyPubKey != 0,
+                "Sybil::_addL1Transaction: INVALID_CREATE_ACCOUNT_WITH_NO_BABYJUB"
+            );
+        } else {
+            require(
+                (fromIdx > _RESERVED_IDX) && (fromIdx <= lastIdx),
+                "Sybil::_addL1Transaction: INVALID_FROMIDX"
+            );
+            require(
+                babyPubKey == 0,
+                "Sybil::_addL1Transaction: BABYJUB_MUST_BE_0_IF_NOT_CREATE_ACCOUNT"
+            );
+        }
+
+        _l1QueueAddTx(
+            ethAddress,
+            babyPubKey,
+            fromIdx,
+            loadAmountF,
+            amountF,
+            toIdx
         );
     }
 
@@ -199,6 +331,48 @@ contract Sybil is SybilHelpers {
                     nLevels: _verifiersParams[i] >> (256 - 8)
                 })
             );
+        }
+    }
+
+    /**
+     * @dev Add L1-user-tx, add it to the correspoding queue
+     * l1Tx L1-user-tx encoded in bytes as follows: [20 bytes] fromEthAddr || [32 bytes] fromBjj-compressed || [4 bytes] fromIdx ||
+     * [5 bytes] loadAmountFloat40 || [5 bytes] amountFloat40 || [4 bytes] tokenId || [4 bytes] toIdx
+     * @param ethAddress Ethereum address of the rollup account
+     * @param babyPubKey Public key babyjubjub represented as point: sign + (Ay)
+     * @param fromIdx Index account of the sender account
+     * @param loadAmountF Amount from L1 to L2
+     * @param amountF  Amount transfered between L2 accounts
+     * @param toIdx Index leaf of recipient account
+     * Events: `L1UserTxEvent`
+     */
+    function _l1QueueAddTx(
+        address ethAddress,
+        uint256 babyPubKey,
+        uint48 fromIdx,
+        uint40 loadAmountF,
+        uint40 amountF,
+        uint48 toIdx
+    ) internal {
+        bytes memory l1Tx = abi.encodePacked(
+            ethAddress,
+            babyPubKey,
+            fromIdx,
+            loadAmountF,
+            amountF,
+            toIdx
+        );
+
+        uint256 currentPosition = mapL1TxQueue[nextL1FillingQueue].length /
+            _L1_USER_TOTALBYTES;
+
+        // concatenate storage byte array with the new l1Tx
+        _concatStorage(mapL1TxQueue[nextL1FillingQueue], l1Tx);
+
+        emit L1UserTxEvent(nextL1FillingQueue, uint8(currentPosition), l1Tx);
+
+        if (currentPosition + 1 >= _MAX_L1_USER_TX) {
+            nextL1FillingQueue++;
         }
     }
 }
