@@ -2,7 +2,6 @@
 
 pragma solidity ^0.8.24;
 
-import "hardhat/console.sol";
 import "./interfaces/IVerifierRollup.sol";
 import "./interfaces/IVerifierWithdrawInterface.sol";
 import "./lib/SybilHelpers.sol";
@@ -39,7 +38,7 @@ contract Sybil is SybilHelpers {
     uint48 constant _EXIT_IDX = 1;
 
     // Max load amount allowed (loadAmount: L1 --> L2)
-    uint256 constant _LIMIT_LOAD_AMOUNT = (1 << 114);
+    uint256 constant _LIMIT_LOAD_AMOUNT = (1 << 128);
 
     // Max amount allowed (amount L2 --> L2)
     uint256 constant _LIMIT_L2TRANSFER_AMOUNT = (1 << 192);
@@ -48,8 +47,8 @@ contract Sybil is SybilHelpers {
     uint256 constant _L1_COORDINATOR_TOTALBYTES = 101;
 
     // [20 bytes] fromEthAddr + [32 bytes] fromBjj-compressed + [6 bytes] fromIdx +
-    // [5 bytes] loadAmountFloat40 + [5 bytes] amountFloat40 + [4 bytes] tokenId + [6 bytes] toIdx
-    uint256 constant _L1_USER_TOTALBYTES = 78;
+    // [5 bytes] loadAmountFloat40 + [5 bytes] amountFloat40 + [6 bytes] toIdx
+    uint256 constant _L1_USER_TOTALBYTES = 74;
 
     // User TXs are the TX made by the user with a L1 TX
     // Coordinator TXs are the L2 account creation made by the coordinator whose signature
@@ -58,7 +57,7 @@ contract Sybil is SybilHelpers {
     // And the maximum User TX is _MAX_L1_USER_TX
 
     // Maximum L1-user transactions allowed to be queued in a batch
-    uint256 constant _MAX_L1_USER_TX = 114;
+    uint256 constant _MAX_L1_USER_TX = 128;
 
     // Maximum L1 transactions allowed to be queued in a batch
     uint256 constant _MAX_L1_TX = 256;
@@ -167,7 +166,7 @@ contract Sybil is SybilHelpers {
         // lastL1L2Batch = 0; // --> first batch forced to be L1Batch
         // nextL1ToForgeQueue = 0; // --> First queue will be forged
         // nextL1FillingQueue = 1;
-        // stateRootMap[0] = 0; // --> genesis batch will have root = 0
+        stateRootMap[0] = 0; // --> genesis batch will have root = 0
 
         // initialize libs
         _initializeHelpers(
