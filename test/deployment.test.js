@@ -167,8 +167,6 @@ describe("Sybil deployment", function () {
       poseidonAddr3,
       poseidonAddr4
     );
-
-    expect(await sybil.owner()).equal(owner.address);
   });
 
   it("Should initialize contract with correct owner", async function() {
@@ -218,7 +216,5 @@ describe("Sybil deployment", function () {
       poseidonAddr3,
       poseidonAddr4
     )).to.emit(sybil, "InitializeSybilEvent").withArgs(forgeL1L2BatchTimeout);
-
-    expect(await sybil.owner()).equal(owner);
   });
 });

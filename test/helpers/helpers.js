@@ -69,6 +69,20 @@ async function deployAndInitializeSybilFixture() {
   return { sybil, owner, contractAddress };
 }
 
+class ForgerTest {
+  constructor(maxTx, maxL1Tx, nLevels, hardhatHermez, rollupDB, realVerifier) {
+    this.rollupDB = rollupDB;
+    this.maxTx = maxTx;
+    this.maxL1Tx = maxL1Tx;
+    this.nLevels = nLevels;
+    this.hardhatHermez = hardhatHermez;
+    this.realVerifier = realVerifier;
+
+    this.L1TxB = 544;
+  }
+
+}
+
 function calculateInputMaxTxLevels(maxTxArray, nLevelsArray) {
   let returnArray = [];
   for (let i = 0; i < maxTxArray.length; i++) {

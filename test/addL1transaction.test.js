@@ -2,7 +2,6 @@ const {
     loadFixture,
   } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
   const { expect } = require("chai");
-  const poseidonUnit = require("circomlib/src/poseidon_gencontract");
   const {
     float40,
     HermezAccount,
@@ -17,7 +16,7 @@ const {
   } = require("@hermeznetwork/commonjs");
   
 const {
-  calculateInputMaxTxLevels, deploySybilFixture, deployAndInitializeSybilFixture
+  deploySybilFixture, deployAndInitializeSybilFixture
 } = require("./helpers/helpers");
   
 const accounts = [];
@@ -35,9 +34,7 @@ describe("Add L1 user transactions", function () {
     })
 
     it("Should deploy and initialize Sybil contract", async function() {
-        const { sybil, owner } = await loadFixture(deployAndInitializeSybilFixture);
-        
-        expect(await sybil.owner()).equal(owner);
+      await loadFixture(deployAndInitializeSybilFixture);
     })
   })
 

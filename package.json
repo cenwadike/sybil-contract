@@ -20,7 +20,7 @@
     "circom": "^0.5.17",
     "circomlib": "^0.5.0",
     "ethers": "^6.4.0",
-    "hardhat": "^2.22.8",
+    "hardhat": "^2.22.9",
     "hardhat-gas-reporter": "^1.0.8",
     "solidity-coverage": "^0.8.0",
     "typechain": "^8.3.0"

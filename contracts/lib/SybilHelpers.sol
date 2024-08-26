@@ -245,4 +245,123 @@ contract SybilHelpers is Initializable {
                 }
         }
     }
+
+    /**
+     * @dev return information from specific call data info
+     * @param posParam parameter number relative to 0 to extract the info
+     * @return ptr ptr to the call data position where the actual data starts
+     * @return len Length of the data
+     */
+    function _getCallData(uint256 posParam)
+        internal
+        pure
+        returns (uint256 ptr, uint256 len)
+    {
+        assembly {
+            let pos := add(4, mul(posParam, 32))
+            ptr := add(calldataload(pos), 4)
+            len := calldataload(ptr)
+            ptr := add(ptr, 32)
+        }
+    }
+
+    /**
+     * @dev This package fills at least len zeros in memory and a maximum of len+31
+     * @param ptr The position where it starts to fill zeros
+     * @param len The minimum quantity of zeros it's added
+     */
+    function _fillZeros(uint256 ptr, uint256 len) internal pure {
+        assembly {
+            let ptrTo := ptr
+            ptr := add(ptr, len)
+            for {
+
+            } lt(ptrTo, ptr) {
+                ptrTo := add(ptrTo, 32)
+            } {
+                mstore(ptrTo, 0)
+            }
+        }
+    }
+
+     /**
+     * @dev Retrieve ethereum address from a (defaultMessage + babyjub) signature
+     * @param babyjub Public key babyjubjub represented as point: sign + (Ay)
+     * @param r Signature parameter
+     * @param s Signature parameter
+     * @param v Signature parameter
+     * @return Ethereum address recovered from the signature
+     */
+    function _checkSig(
+        bytes32 babyjub,
+        bytes32 r,
+        bytes32 s,
+        uint8 v
+    ) internal view returns (address) {
+        // from https://github.com/OpenZeppelin/openzeppelin-contracts/blob/master/contracts/cryptography/ECDSA.sol#L46
+        // EIP-2 still allows signature malleability for ecrecover(). Remove this possibility and make the signature
+        // unique. Appendix F in the Ethereum Yellow paper (https://ethereum.github.io/yellowpaper/paper.pdf), defines
+        // the valid range for s in (281): 0 < s < secp256k1n ÷ 2 + 1, and for v in (282): v ∈ {27, 28}. Most
+        // signatures from current libraries generate a unique signature with an s-value in the lower half order.
+        //
+        // If your library generates malleable signatures, such as s-values in the upper range, calculate a new s-value
+        // with 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141 - s1 and flip v from 27 to 28 or
+        // vice versa. If your library also generates signatures with 0/1 for v instead 27/28, add 27 to v to accept
+        // these malleable signatures as well.
+        require(
+            uint256(s) <=
+                0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0,
+            "HermezHelpers::_checkSig: INVALID_S_VALUE"
+        );
+
+        bytes32 encodeData =
+            keccak256(
+                abi.encode(
+                    AUTHORISE_TYPEHASH,
+                    HERMEZ_NETWORK_HASH,
+                    ACCOUNT_CREATION_HASH,
+                    babyjub
+                )
+            );
+
+        bytes32 messageDigest =
+            keccak256(
+                abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR(), encodeData)
+            );
+
+        address ethAddress = ecrecover(messageDigest, v, r, s);
+
+        require(
+            ethAddress != address(0),
+            "HermezHelpers::_checkSig: INVALID_SIGNATURE"
+        );
+
+        return ethAddress;
+    }
+
+    /**
+     * @dev Retrieve the DOMAIN_SEPARATOR hash
+     * @return domainSeparator hash used for sign messages
+     */
+    function DOMAIN_SEPARATOR() public view returns (bytes32 domainSeparator) {
+        return
+            keccak256(
+                abi.encode(
+                    EIP712DOMAIN_HASH,
+                    NAME_HASH,
+                    VERSION_HASH,
+                    getChainId(),
+                    address(this)
+                )
+            );
+    }
+
+    /**
+     * @return chainId The current chainId where the smarctoncract is executed
+     */
+    function getChainId() public view returns (uint256 chainId) {
+        assembly {
+            chainId := chainid()
+        }
+    }
 }

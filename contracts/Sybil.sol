@@ -6,7 +6,6 @@ import "./interfaces/IVerifierRollup.sol";
 import "./interfaces/IVerifierWithdrawInterface.sol";
 import "./lib/SybilHelpers.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
 
 contract Sybil is SybilHelpers {
     struct VerifierRollup {
@@ -43,8 +42,8 @@ contract Sybil is SybilHelpers {
     // Max amount allowed (amount L2 --> L2)
     uint256 constant _LIMIT_L2TRANSFER_AMOUNT = (1 << 192);
 
-    // [65 bytes] compressedSignature + [32 bytes] fromBjj-compressed + [4 bytes] tokenId
-    uint256 constant _L1_COORDINATOR_TOTALBYTES = 101;
+    // [65 bytes] compressedSignature + [32 bytes] fromBjj-compressed 
+    uint256 constant _L1_COORDINATOR_TOTALBYTES = 97;
 
     // [20 bytes] fromEthAddr + [32 bytes] fromBjj-compressed + [6 bytes] fromIdx +
     // [5 bytes] loadAmountFloat40 + [5 bytes] amountFloat40 + [6 bytes] toIdx
@@ -118,9 +117,6 @@ contract Sybil is SybilHelpers {
     // Max ethereum blocks after the last L1-L2-batch, when exceeds the timeout only L1-L2-batch are allowed
     uint8 public forgeL1L2BatchTimeout;
 
-    // contract admin
-    address public owner;
-
     // Event emitted when the contract is initialized
     event InitializeSybilEvent(
         uint8 forgeL1L2BatchTimeout
@@ -154,9 +150,6 @@ contract Sybil is SybilHelpers {
         address _poseidon3Elements,
         address _poseidon4Elements
     ) external initializer {
-        // set admin state variable
-        owner = address(msg.sender);
-
         // set state variables
         _initializeVerifiers(_verifiers, _verifiersParams);
         forgeL1L2BatchTimeout = _forgeL1L2BatchTimeout;
@@ -178,6 +171,96 @@ contract Sybil is SybilHelpers {
         emit InitializeSybilEvent(
             _forgeL1L2BatchTimeout
         );
+    }
+
+    //////////////
+    // Coordinator operations
+    /////////////
+
+     /**
+     * @dev Forge a new batch providing the L2 Transactions, L1Corrdinator transactions and the proof.
+     * If the proof is succesfully verified, update the current state, adding a new state and exit root.
+     * In order to optimize the gas consumption the parameters `encodedL1CoordinatorTx`, `l1L2TxsData` and `feeIdxCoordinator`
+     * are read directly from the calldata using assembly with the instruction `calldatacopy`
+     * @param newLastIdx New total rollup accounts
+     * @param newStRoot New state root
+     * @param newExitRoot New exit root
+     * @param encodedL1CoordinatorTx Encoded L1-coordinator transactions
+     * @param l1L2TxsData Encoded l2 data
+     * @param feeIdxCoordinator Encoded idx accounts of the coordinator where the fees will be payed
+     * @param verifierIdx Verifier index
+     * @param l1Batch Indicates if this batch will be L2 or L1-L2
+     * @param proofA zk-snark input
+     * @param proofB zk-snark input
+     * @param proofC zk-snark input
+     * Events: `ForgeBatch`
+     */
+    function forgeBatch(
+        uint48 newLastIdx,
+        uint256 newStRoot,
+        uint256 newExitRoot,
+        bytes calldata encodedL1CoordinatorTx,
+        bytes calldata l1L2TxsData,
+        bytes calldata feeIdxCoordinator,
+        uint8 verifierIdx,
+        bool l1Batch,
+        uint256[2] calldata proofA,
+        uint256[2][2] calldata proofB,
+        uint256[2] calldata proofC
+    ) external virtual {
+        // Assure data availability from regular ethereum nodes
+        // We include this line because it's easier to track the transaction data, as it will never be in an internal TX.
+        // In general this makes no sense, as callling this function from another smart contract will have to pay the calldata twice.
+        // But forcing, it avoids having to check.
+        require(
+            msg.sender == tx.origin,
+            "Sybil::forgeBatch: INTENAL_TX_NOT_ALLOWED"
+        );
+
+        if (!l1Batch) {
+            require(
+                block.number < (lastL1L2Batch + forgeL1L2BatchTimeout), // No overflow since forgeL1L2BatchTimeout is an uint8
+                "Sybil::forgeBatch: L1L2BATCH_REQUIRED"
+            );
+        }
+
+        // calculate input
+        uint256 input = _constructCircuitInput(
+            newLastIdx,
+            newStRoot,
+            newExitRoot,
+            l1Batch,
+            verifierIdx
+        );
+
+        // verify proof
+        require(
+            rollupVerifiers[verifierIdx].verifierInterface.verifyProof(
+                proofA,
+                proofB,
+                proofC,
+                [input]
+            ),
+            "Sybil::forgeBatch: INVALID_PROOF"
+        );
+
+        // update state
+        lastForgedBatch++;
+        lastIdx = newLastIdx;
+        stateRootMap[lastForgedBatch] = newStRoot;
+        exitRootsMap[lastForgedBatch] = newExitRoot;
+        l1L2TxsDataHashMap[lastForgedBatch] = sha256(l1L2TxsData);
+
+
+        uint16 l1UserTxsLen;
+        if (l1Batch) {
+            // restart the timeout
+            lastL1L2Batch = uint64(block.number);
+            // clear current queue
+            l1UserTxsLen = _clearQueue();
+        }
+
+        emit ForgeBatch(lastForgedBatch, l1UserTxsLen);
     }
 
     //////////////
@@ -336,7 +419,7 @@ contract Sybil is SybilHelpers {
     /**
      * @dev Add L1-user-tx, add it to the correspoding queue
      * l1Tx L1-user-tx encoded in bytes as follows: [20 bytes] fromEthAddr || [32 bytes] fromBjj-compressed || [4 bytes] fromIdx ||
-     * [5 bytes] loadAmountFloat40 || [5 bytes] amountFloat40 || [4 bytes] tokenId || [4 bytes] toIdx
+     * [5 bytes] loadAmountFloat40 || [5 bytes] amountFloat40 || [4 bytes] toIdx
      * @param ethAddress Ethereum address of the rollup account
      * @param babyPubKey Public key babyjubjub represented as point: sign + (Ay)
      * @param fromIdx Index account of the sender account
@@ -373,5 +456,249 @@ contract Sybil is SybilHelpers {
         if (currentPosition + 1 >= _MAX_L1_USER_TX) {
             nextL1FillingQueue++;
         }
+    }
+
+    /**
+     * @dev Calculate the circuit input hashing all the elements
+     * @param newLastIdx New total rollup accounts
+     * @param newStRoot New state root
+     * @param newExitRoot New exit root
+     * @param l1Batch Indicates if this forge will be L2 or L1-L2
+     * @param verifierIdx Verifier index
+     */
+    function _constructCircuitInput(
+        uint48 newLastIdx,
+        uint256 newStRoot,
+        uint256 newExitRoot,
+        bool l1Batch,
+        uint8 verifierIdx
+    ) internal view returns (uint256) {
+        uint256 oldStRoot = stateRootMap[lastForgedBatch];
+        uint256 oldLastIdx = lastIdx;
+        uint256 dPtr; // Pointer to the calldata parameter data
+        uint256 dLen; // Length of the calldata parameter
+
+        // l1L2TxsData = l2Bytes * maxTx =
+        // ([(nLevels / 8) bytes] fromIdx + [(nLevels / 8) bytes] toIdx + [5 bytes] amountFloat40 + [1 bytes] fee) * maxTx =
+        // ((nLevels / 4) bytes + 3 bytes) * maxTx
+        uint256 l1L2TxsDataLength = ((rollupVerifiers[verifierIdx].nLevels /
+            8) *
+            2 +
+            5 +
+            1) * rollupVerifiers[verifierIdx].maxTx;
+
+        // [(nLevels / 8) bytes]
+        uint256 feeIdxCoordinatorLength = (rollupVerifiers[verifierIdx]
+            .nLevels / 8) * 64;
+
+        // the concatenation of all arguments could be done with abi.encodePacked(args), but is suboptimal, especially with a large bytes arrays
+        // [6 bytes] lastIdx +
+        // [6 bytes] newLastIdx  +
+        // [32 bytes] stateRoot  +
+        // [32 bytes] newStRoot  +
+        // [32 bytes] newExitRoot +
+        // [_MAX_L1_TX * _L1_USER_TOTALBYTES bytes] l1TxsData +
+        // totall1L2TxsDataLength +
+        // feeIdxCoordinatorLength +
+        // [2 bytes] chainID +
+        // [4 bytes] batchNum =
+        // _INPUT_SHA_CONSTANT_BYTES bytes +  totall1L2TxsDataLength + feeIdxCoordinatorLength
+        bytes memory inputBytes;
+
+        uint256 ptr; // Position for writing the bufftr
+
+        assembly {
+            let inputBytesLength := add(
+                add(_INPUT_SHA_CONSTANT_BYTES, l1L2TxsDataLength),
+                feeIdxCoordinatorLength
+            )
+
+            // Set inputBytes to the next free memory space
+            inputBytes := mload(0x40)
+            // Reserve the memory. 32 for the length , the input bytes and 32
+            // extra bytes at the end for word manipulation
+            mstore(0x40, add(add(inputBytes, 0x40), inputBytesLength))
+
+            // Set the actual length of the input bytes
+            mstore(inputBytes, inputBytesLength)
+
+            // Set The Ptr at the begining of the inputPubber
+            ptr := add(inputBytes, 32)
+
+            mstore(ptr, shl(208, oldLastIdx)) // 256-48 = 208
+            ptr := add(ptr, 6)
+
+            mstore(ptr, shl(208, newLastIdx)) // 256-48 = 208
+            ptr := add(ptr, 6)
+
+            mstore(ptr, oldStRoot)
+            ptr := add(ptr, 32)
+
+            mstore(ptr, newStRoot)
+            ptr := add(ptr, 32)
+
+            mstore(ptr, newExitRoot)
+            ptr := add(ptr, 32)
+        }
+
+        // Copy the L1TX Data
+        _buildL1Data(ptr, l1Batch);
+        ptr += _MAX_L1_TX * _L1_USER_TOTALBYTES;
+
+        // Copy the L2 TX Data from calldata
+        (dPtr, dLen) = _getCallData(4);
+        require(
+            dLen <= l1L2TxsDataLength,
+            "Sybil::_constructCircuitInput: L2_TX_OVERFLOW"
+        );
+        assembly {
+            calldatacopy(ptr, dPtr, dLen)
+        }
+        ptr += dLen;
+
+        // L2 TX unused data is padded with 0 at the end
+        _fillZeros(ptr, l1L2TxsDataLength - dLen);
+        ptr += l1L2TxsDataLength - dLen;
+
+        // Copy the FeeIdxCoordinator from the calldata
+        (dPtr, dLen) = _getCallData(5);
+        require(
+            dLen <= feeIdxCoordinatorLength,
+            "Sybil::_constructCircuitInput: INVALID_FEEIDXCOORDINATOR_LENGTH"
+        );
+        assembly {
+            calldatacopy(ptr, dPtr, dLen)
+        }
+        ptr += dLen;
+        _fillZeros(ptr, feeIdxCoordinatorLength - dLen);
+        ptr += feeIdxCoordinatorLength - dLen;
+
+        // store 2 bytes of chainID at the end of the inputBytes
+        assembly {
+            mstore(ptr, shl(240, chainid())) // 256 - 16 = 240
+        }
+        ptr += 2;
+
+        uint256 batchNum = lastForgedBatch + 1;
+
+        // store 4 bytes of batch number at the end of the inputBytes
+        assembly {
+            mstore(ptr, shl(224, batchNum)) // 256 - 32 = 224
+        }
+
+        return uint256(sha256(inputBytes)) % _RFIELD;
+    }
+
+    /**
+     * @dev Clear the current queue, and update the `nextL1ToForgeQueue` and `nextL1FillingQueue` if needed
+     */
+    function _clearQueue() internal returns (uint16) {
+        uint16 l1UserTxsLen = uint16(
+            mapL1TxQueue[nextL1ToForgeQueue].length / _L1_USER_TOTALBYTES
+        );
+        delete mapL1TxQueue[nextL1ToForgeQueue];
+        nextL1ToForgeQueue++;
+        if (nextL1ToForgeQueue == nextL1FillingQueue) {
+            nextL1FillingQueue++;
+        }
+        return l1UserTxsLen;
+    }
+
+    /**
+     * @dev return the current L1-user-tx queue adding the L1-coordinator-tx
+     * @param ptr Ptr where L1 data is set
+     * @param l1Batch if true, the include l1TXs from the queue
+     * [1 byte] V(ecdsa signature) || [32 bytes] S(ecdsa signature) ||
+     * [32 bytes] R(ecdsa signature) || [32 bytes] fromBjj-compressed
+     */
+    function _buildL1Data(uint256 ptr, bool l1Batch) internal view {
+        uint256 dPtr;
+        uint256 dLen;
+
+        (dPtr, dLen) = _getCallData(3);
+        uint256 l1CoordinatorLength = dLen / _L1_COORDINATOR_TOTALBYTES;
+
+        uint256 l1UserLength;
+        bytes memory l1UserTxQueue;
+        if (l1Batch) {
+            l1UserTxQueue = mapL1TxQueue[nextL1ToForgeQueue];
+            l1UserLength = l1UserTxQueue.length / _L1_USER_TOTALBYTES;
+        } else {
+            l1UserLength = 0;
+        }
+
+        require(
+            l1UserLength + l1CoordinatorLength <= _MAX_L1_TX,
+            "Sybil::_buildL1Data: L1_TX_OVERFLOW"
+        );
+
+        if (l1UserLength > 0) {
+            // Copy the queue to the ptr and update ptr
+            assembly {
+                let ptrFrom := add(l1UserTxQueue, 0x20)
+                let ptrTo := ptr
+                ptr := add(ptr, mul(l1UserLength, _L1_USER_TOTALBYTES))
+                for {
+
+                } lt(ptrTo, ptr) {
+                    ptrTo := add(ptrTo, 32)
+                    ptrFrom := add(ptrFrom, 32)
+                } {
+                    mstore(ptrTo, mload(ptrFrom))
+                }
+            }
+        }
+
+        for (uint256 i = 0; i < l1CoordinatorLength; i++) {
+            uint8 v; // L1-Coordinator-Tx bytes[0]
+            bytes32 s; // L1-Coordinator-Tx bytes[1:32]
+            bytes32 r; // L1-Coordinator-Tx bytes[33:64]
+            bytes32 babyPubKey; // L1-Coordinator-Tx bytes[65:96]
+
+            assembly {
+                v := byte(0, calldataload(dPtr))
+                dPtr := add(dPtr, 1)
+
+                s := calldataload(dPtr)
+                dPtr := add(dPtr, 32)
+
+                r := calldataload(dPtr)
+                dPtr := add(dPtr, 32)
+
+                babyPubKey := calldataload(dPtr)
+                dPtr := add(dPtr, 32)
+            }
+
+            address ethAddress = _ETH_ADDRESS_INTERNAL_ONLY;
+
+            // v must be >=27 --> EIP-155, v == 0 means no signature
+            if (v != 0) {
+                ethAddress = _checkSig(babyPubKey, r, s, v);
+            }
+
+            // add L1-Coordinator-Tx to the L1-tx queue
+            assembly {
+                mstore(ptr, shl(96, ethAddress)) // 256 - 160 = 96, write ethAddress: bytes[0:19]
+                ptr := add(ptr, 20)
+
+                mstore(ptr, babyPubKey) // write babyPubKey: bytes[20:51]
+                ptr := add(ptr, 32)
+
+                mstore(ptr, 0) // write zeros
+                // [6 Bytes] fromIdx ,
+                // [5 bytes] loadAmountFloat40 .
+                // [5 bytes] amountFloat40
+                ptr := add(ptr, 16)
+
+                mstore(ptr, 0) // write [6 Bytes] toIdx
+                ptr := add(ptr, 6)
+            }
+        }
+
+        _fillZeros(
+            ptr,
+            (_MAX_L1_TX - l1UserLength - l1CoordinatorLength) *
+                _L1_USER_TOTALBYTES
+        );
     }
 }
