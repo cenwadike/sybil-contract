@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0
 
-pragma solidity ^0.8.24;
+pragma solidity 0.6.12;
 
 import "./interfaces/IVerifierRollup.sol";
 import "./interfaces/IVerifierWithdrawInterface.sol";
-import "./lib/SybilHelpers.sol";
+import "./lib/InstantWithdrawManager.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-contract Sybil is SybilHelpers {
+contract Sybil is InstantWithdrawManager {
     struct VerifierRollup {
         VerifierRollupInterface verifierInterface;
         uint256 maxTx; // maximum rollup transactions in a batch: L2-tx + L1-tx transactions
@@ -101,6 +101,10 @@ contract Sybil is SybilHelpers {
     // rootId => (Idx => true/false)
     mapping(uint32 => mapping(uint48 => bool)) public exitNullifierMap;
 
+    // Mapping of L1 balance
+    // address => uint256
+    mapping (address => uint) L1BalanceMap;
+
     // Map of queues of L1-user-tx transactions, the transactions are stored in bytes32 sequentially
     // The coordinator is forced to forge the next queue in the next L1-L2-batch
     mapping(uint32 => bytes) public mapL1TxQueue;
@@ -132,6 +136,11 @@ contract Sybil is SybilHelpers {
     // Event emitted every time a batch is forged
     event ForgeBatch(uint32 indexed batchNum, uint16 l1UserTxsLen);
 
+    // event emitted when an L1 deposit is done
+    event L1EthDeposit(
+        address indexed sender,
+        uint256 indexed amount
+    );
     // Event emitted when a withdrawal is done
     event WithdrawEvent(
         uint48 indexed idx,
@@ -395,6 +404,79 @@ contract Sybil is SybilHelpers {
         );
     }
 
+    //////////////
+    // User operations
+    /////////////
+
+    function depositL1Eth() payable external {
+        L1BalanceMap[msg.sender] += msg.value;
+        emit L1EthDeposit(msg.sender, msg.value);
+    }
+
+    /**
+     * @dev Withdraw to retrieve the tokens from the exit tree to the owner account
+     * Before this call an exit transaction must be done
+     * @param amount Amount to retrieve
+     * @param babyPubKey Public key babyjubjub represented as point: sign + (Ay)
+     * @param numExitRoot Batch number where the exit transaction has been done
+     * @param siblings Siblings to demonstrate merkle tree proof
+     * @param idx Index of the exit tree account
+     * @param instantWithdraw true if is an instant withdraw
+     * Events: `WithdrawEvent`
+     */
+    function withdrawMerkleProof(
+        uint192 amount,
+        uint256 babyPubKey,
+        uint32 numExitRoot,
+        uint256[] memory siblings,
+        uint48 idx,
+        bool instantWithdraw
+    ) external {
+        require(L1BalanceMap[msg.sender] >= amount,
+            "Sybil::withdrawMerkleProof: INSUFFICIENT_BALANCE"
+        );
+        // numExitRoot is not checked because an invalid numExitRoot will bring to a 0 root
+        // and this is an empty tree.
+        // in case of instant withdraw assure that is available
+        if (instantWithdraw) {
+            require(
+                _processInstantWithdrawal(address(0), amount),
+                "Sybil::withdrawMerkleProof: INSTANT_WITHDRAW_WASTED_FOR_THIS_USD_RANGE"
+            );
+        }
+
+        // build 'key' and 'value' for exit tree
+        uint256[4] memory arrayState = _buildTreeState(
+            0,
+            0,
+            amount,
+            babyPubKey,
+            msg.sender
+        );
+        uint256 stateHash = _hash4Elements(arrayState);
+        // get exit root given its index depth
+        uint256 exitRoot = exitRootsMap[numExitRoot];
+        // check exit tree nullifier
+        require(
+            exitNullifierMap[numExitRoot][idx] == false,
+            "Sybil::withdrawMerkleProof: WITHDRAW_ALREADY_DONE"
+        );
+        // check sparse merkle tree proof
+        require(
+            _smtVerifier(exitRoot, siblings, idx, stateHash) == true,
+            "Sybil::withdrawMerkleProof: SMT_PROOF_INVALID"
+        );
+
+        // set nullifier
+        exitNullifierMap[numExitRoot][idx] = true;
+
+        // update balance
+        _withdrawFunds(amount, 0);
+        L1BalanceMap[msg.sender] -= amount;
+
+        emit WithdrawEvent(idx, numExitRoot, instantWithdraw);
+    }
+
     /**
      * @dev Initialize verifiers
      * @param _verifiers verifiers address array
@@ -605,6 +687,19 @@ contract Sybil is SybilHelpers {
     }
 
     /**
+     * @dev Withdraw the funds to the msg.sender if instant withdraw or to the withdraw delayer if delayed
+     * @param amount Amount to retrieve
+     * @param tokenID Token identifier
+     */
+    function _withdrawFunds(
+        uint192 amount,
+        uint32 tokenID
+    ) internal {
+        _safeTransfer(address(0), msg.sender, amount);
+    }
+
+
+    /**
      * @dev return the current L1-user-tx queue adding the L1-coordinator-tx
      * @param ptr Ptr where L1 data is set
      * @param l1Batch if true, the include l1TXs from the queue
@@ -699,6 +794,144 @@ contract Sybil is SybilHelpers {
             ptr,
             (_MAX_L1_TX - l1UserLength - l1CoordinatorLength) *
                 _L1_USER_TOTALBYTES
+        );
+    }
+
+    ///////////
+    // helpers ERC20 functions
+    ///////////
+
+    /**
+     * @dev Approve ERC20
+     * @param token Token address
+     * @param to Recievers
+     * @param value Quantity of tokens to approve
+     */
+    function _safeApprove(
+        address token,
+        address to,
+        uint256 value
+    ) internal {
+        /* solhint-disable avoid-low-level-calls */
+        (bool success, bytes memory data) = token.call(
+            abi.encodeWithSelector(_APPROVE_SIGNATURE, to, value)
+        );
+        require(
+            success && (data.length == 0 || abi.decode(data, (bool))),
+            "Sybil::_safeApprove: ERC20_APPROVE_FAILED"
+        );
+    }
+
+    /**
+     * @dev Transfer tokens or ether from the smart contract
+     * @param token Token address
+     * @param to Address to recieve the tokens
+     * @param value Quantity to transfer
+     */
+    function _safeTransfer(
+        address token,
+        address to,
+        uint256 value
+    ) internal {
+        // address 0 is reserved for eth
+        if (token == address(0)) {
+            /* solhint-disable avoid-low-level-calls */
+            (bool success, ) = msg.sender.call{value: value}(new bytes(0));
+            require(success, "Sybil::_safeTransfer: ETH_TRANSFER_FAILED");
+        } else {
+            /* solhint-disable avoid-low-level-calls */
+            (bool success, bytes memory data) = token.call(
+                abi.encodeWithSelector(_TRANSFER_SIGNATURE, to, value)
+            );
+            require(
+                success && (data.length == 0 || abi.decode(data, (bool))),
+                "Sybil::_safeTransfer: ERC20_TRANSFER_FAILED"
+            );
+        }
+    }
+
+    /**
+     * @dev transferFrom ERC20
+     * Require approve tokens for this contract previously
+     * @param token Token address
+     * @param from Sender
+     * @param to Reciever
+     * @param value Quantity of tokens to send
+     */
+    function _safeTransferFrom(
+        address token,
+        address from,
+        address to,
+        uint256 value
+    ) internal {
+        (bool success, bytes memory data) = token.call(
+            abi.encodeWithSelector(_TRANSFER_FROM_SIGNATURE, from, to, value)
+        );
+        require(
+            success && (data.length == 0 || abi.decode(data, (bool))),
+            "Sybil::_safeTransferFrom: ERC20_TRANSFERFROM_FAILED"
+        );
+    }
+
+    ///////////
+    // helpers ERC20 extension functions
+    ///////////
+
+    /**
+     * @notice Function to call token permit method of extended ERC20
+     * @param _amount Quantity that is expected to be allowed
+     * @param _permitData Raw data of the call `permit` of the token
+     */
+    function _permit(
+        address token,
+        uint256 _amount,
+        bytes calldata _permitData
+    ) internal {
+        bytes4 sig = abi.decode(_permitData, (bytes4));
+        require(
+            sig == _PERMIT_SIGNATURE,
+            "Sybil::_permit: NOT_VALID_CALL"
+        );
+        (
+            address owner,
+            address spender,
+            uint256 value,
+            uint256 deadline,
+            uint8 v,
+            bytes32 r,
+            bytes32 s
+        ) = abi.decode(
+            _permitData[4:],
+            (address, address, uint256, uint256, uint8, bytes32, bytes32)
+        );
+        require(
+            owner == msg.sender,
+            "Sybil::_permit: PERMIT_OWNER_MUST_BE_THE_SENDER"
+        );
+        require(
+            spender == address(this),
+            "Sybil::_permit: SPENDER_MUST_BE_THIS"
+        );
+        require(
+            value == _amount,
+            "Sybil::_permit: PERMIT_AMOUNT_DOES_NOT_MATCH"
+        );
+
+        // we call without checking the result, in case it fails and he doesn't have enough balance
+        // the following transferFrom should be fail. This prevents DoS attacks from using a signature
+        // before the smartcontract call
+        /* solhint-disable avoid-low-level-calls */
+        address(token).call(
+            abi.encodeWithSelector(
+                _PERMIT_SIGNATURE,
+                owner,
+                spender,
+                value,
+                deadline,
+                v,
+                r,
+                s
+            )
         );
     }
 }

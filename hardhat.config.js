@@ -25,13 +25,13 @@ module.exports = {
     apiKey: process.env.ETHERSCAN_API_KEY,
   },
   solidity: {
-    version: "0.8.24",
+    version: "0.6.12",
     settings: {
       optimizer: {
         enabled: true, // Default: false
         runs: 200, // Default: 200
       },
-      viaIR: true,
+      // viaIR: true,
     }
   },
   gasReporter: {

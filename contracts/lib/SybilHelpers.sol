@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0
 
-pragma solidity ^0.8.24;
+pragma solidity ^0.6.12;
 
-import "@openzeppelin/contracts/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/Initializable.sol";
 
 /**
  * @dev Interface poseidon hash function 2 elements
@@ -73,10 +73,143 @@ contract SybilHelpers is Initializable {
         address _poseidon2Elements,
         address _poseidon3Elements,
         address _poseidon4Elements
-    ) internal onlyInitializing {
+    ) internal initializer {
         _insPoseidonUnit2 = PoseidonUnit2(_poseidon2Elements);
         _insPoseidonUnit3 = PoseidonUnit3(_poseidon3Elements);
         _insPoseidonUnit4 = PoseidonUnit4(_poseidon4Elements);
+    }
+
+    /**
+     * @dev Hash poseidon for 2 elements
+     * @param inputs Poseidon input array of 2 elements
+     * @return Poseidon hash
+     */
+    function _hash2Elements(uint256[2] memory inputs)
+        internal
+        view
+        returns (uint256)
+    {
+        return _insPoseidonUnit2.poseidon(inputs);
+    }
+
+    /**
+     * @dev Hash poseidon for 3 elements
+     * @param inputs Poseidon input array of 3 elements
+     * @return Poseidon hash
+     */
+    function _hash3Elements(uint256[3] memory inputs)
+        internal
+        view
+        returns (uint256)
+    {
+        return _insPoseidonUnit3.poseidon(inputs);
+    }
+
+    /**
+     * @dev Hash poseidon for 4 elements
+     * @param inputs Poseidon input array of 4 elements
+     * @return Poseidon hash
+     */
+    function _hash4Elements(uint256[4] memory inputs)
+        internal
+        view
+        returns (uint256)
+    {
+        return _insPoseidonUnit4.poseidon(inputs);
+    }
+
+    /**
+     * @dev Hash poseidon for sparse merkle tree nodes
+     * @param left Input element array
+     * @param right Input element array
+     * @return Poseidon hash
+     */
+    function _hashNode(uint256 left, uint256 right)
+        internal
+        view
+        returns (uint256)
+    {
+        uint256[2] memory inputs;
+        inputs[0] = left;
+        inputs[1] = right;
+        return _hash2Elements(inputs);
+    }
+
+    /**
+     * @dev Hash poseidon for sparse merkle tree final nodes
+     * @param key Input element array
+     * @param value Input element array
+     * @return Poseidon hash1
+     */
+    function _hashFinalNode(uint256 key, uint256 value)
+        internal
+        view
+        returns (uint256)
+    {
+        uint256[3] memory inputs;
+        inputs[0] = key;
+        inputs[1] = value;
+        inputs[2] = 1;
+        return _hash3Elements(inputs);
+    }
+
+    /**
+     * @dev Verify sparse merkle tree proof
+     * @param root Root to verify
+     * @param siblings Siblings necessary to compute the merkle proof
+     * @param key Key to verify
+     * @param value Value to verify
+     * @return True if verification is correct, false otherwise
+     */
+    function _smtVerifier(
+        uint256 root,
+        uint256[] memory siblings,
+        uint256 key,
+        uint256 value
+    ) internal view returns (bool) {
+        // Step 2: Calcuate root
+        uint256 nextHash = _hashFinalNode(key, value);
+        uint256 siblingTmp;
+        for (int256 i = int256(siblings.length) - 1; i >= 0; i--) {
+            siblingTmp = siblings[uint256(i)];
+            bool leftRight = (uint8(key >> i) & 0x01) == 1;
+            nextHash = leftRight
+                ? _hashNode(siblingTmp, nextHash)
+                : _hashNode(nextHash, siblingTmp);
+        }
+
+        // Step 3: Check root
+        return root == nextHash;
+    }
+
+    /**
+     * @dev Build entry for the exit tree leaf
+     * @param token Token identifier
+     * @param nonce nonce parameter, only use 40 bits instead of 48
+     * @param balance Balance of the account
+     * @param ay Public key babyjubjub represented as point: sign + (Ay)
+     * @param ethAddress Ethereum address
+     * @return uint256 array with the state variables
+     */
+    function _buildTreeState(
+        uint32 token,
+        uint48 nonce,
+        uint256 balance,
+        uint256 ay,
+        address ethAddress
+    ) internal pure returns (uint256[4] memory) {
+        uint256[4] memory stateArray;
+
+        stateArray[0] = token;
+        stateArray[0] |= nonce << 32;
+        stateArray[0] |= (ay >> 255) << (32 + 40);
+        // build element 2
+        stateArray[1] = balance;
+        // build element 4
+        stateArray[2] = (ay << 1) >> 1; // last bit set to 0
+        // build element 5
+        stateArray[3] = uint256(ethAddress);
+        return stateArray;
     }
 
     /**
@@ -111,7 +244,7 @@ contract SybilHelpers is Initializable {
             // Read the first 32 bytes of _preBytes storage, which is the length
             // of the array. (We don't need to use the offset into the slot
             // because arrays use the entire slot.)
-            let fslot := sload(_preBytes.slot)
+            let fslot := sload(_preBytes_slot)
             // Arrays of 31 bytes or less have an even value in their slot,
             // while longer arrays have an odd value. The actual length is
             // the slot divided by two for odd values, and the lowest order
@@ -134,7 +267,7 @@ contract SybilHelpers is Initializable {
                     // update the contents of the slot.
                     // uint256(bytes_storage) = uint256(bytes_storage) + uint256(bytes_memory) + new_length
                     sstore(
-                        _preBytes.slot,
+                        _preBytes_slot,
                         // all the modifications to the slot are inside this
                         // next block
                         add(
@@ -164,11 +297,11 @@ contract SybilHelpers is Initializable {
                     // The stored value fits in the slot, but the combined value
                     // will exceed it.
                     // get the keccak hash to get the contents of the array
-                    mstore(0x0, _preBytes.slot)
+                    mstore(0x0, _preBytes_slot)
                     let sc := add(keccak256(0x0, 0x20), div(slength, 32))
 
                     // save new length
-                    sstore(_preBytes.slot, add(mul(newlength, 2), 1))
+                    sstore(_preBytes_slot, add(mul(newlength, 2), 1))
 
                     // The contents of the _postBytes array start 32 bytes into
                     // the structure. Our first read should obtain the `submod`
@@ -211,12 +344,12 @@ contract SybilHelpers is Initializable {
                 }
                 default {
                     // get the keccak hash to get the contents of the array
-                    mstore(0x0, _preBytes.slot)
+                    mstore(0x0, _preBytes_slot)
                     // Start copying to the last used word of the stored array.
                     let sc := add(keccak256(0x0, 0x20), div(slength, 32))
 
                     // save new length
-                    sstore(_preBytes.slot, add(mul(newlength, 2), 1))
+                    sstore(_preBytes_slot, add(mul(newlength, 2), 1))
 
                     // Copy over the first `submod` bytes of the new data as in
                     // case 1 above.

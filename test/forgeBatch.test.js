@@ -3,16 +3,7 @@ const {
   } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
   const { expect } = require("chai");
   const {
-    float40,
     HermezAccount,
-    txUtils,
-    stateUtils,
-    utils,
-    feeTable,
-    SMTTmpDb,
-    Constants,
-    RollupDB,
-    BatchBuilder,
   } = require("@hermeznetwork/commonjs");
   
 const {

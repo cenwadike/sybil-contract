@@ -117,7 +117,7 @@ describe("Sybil deployment", function () {
       poseidonAddr2,
       poseidonAddr3,
       poseidonAddr4
-    )).to.be.revertedWithCustomError(sybil, "InvalidInitialization()");
+    )).to.be.revertedWith("Initializable: contract is already initialized");
   });
   
   it("Should emit event after initialization", async function() {

@@ -4,15 +4,7 @@ const {
   const { expect } = require("chai");
   const {
     float40,
-    HermezAccount,
-    txUtils,
-    stateUtils,
-    utils,
-    feeTable,
-    SMTTmpDb,
-    Constants,
-    RollupDB,
-    BatchBuilder,
+    HermezAccount
   } = require("@hermeznetwork/commonjs");
   
 const {
