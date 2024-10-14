@@ -432,9 +432,9 @@ contract Sybil is InstantWithdrawManager {
         uint48 idx,
         bool instantWithdraw
     ) external {
-        require(L1BalanceMap[msg.sender] >= amount,
-            "Sybil::withdrawMerkleProof: INSUFFICIENT_BALANCE"
-        );
+        // require(L1BalanceMap[msg.sender] >= amount,
+        //     "Sybil::withdrawMerkleProof: INSUFFICIENT_BALANCE"
+        // );
         // numExitRoot is not checked because an invalid numExitRoot will bring to a 0 root
         // and this is an empty tree.
         // in case of instant withdraw assure that is available
